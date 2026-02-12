@@ -1,0 +1,17 @@
+# Ignore everything by default
+*
+
+# Keep git metadata files
+!.gitignore
+
+# Track only this skill directory
+!.agents/
+!.agents/skills/
+!.agents/skills/pptxgenjs-decksmith/
+!.agents/skills/pptxgenjs-decksmith/**
+
+# But exclude dependency artifacts inside the skill
+.agents/skills/pptxgenjs-decksmith/scripts/node_modules/
+
+# OS noise
+.DS_Store
