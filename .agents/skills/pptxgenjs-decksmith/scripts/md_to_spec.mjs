@@ -1,28 +1,10 @@
-/**
- * slides.md format (recommended):
- * - H2 ("##") begins a new slide section
- * - Optional HTML comment hint: <!-- slide:type=twoColumn ... -->
- * - Content:
- *   - bullets: "- item"
- *   - title slide: "- title: X" "- subtitle: Y"
- *   - kpiCards: "- 売上: 100" style lines
- *   - timeline: "- Label: Text" style lines
- *   - comparisonTable: markdown table or "columns=" hint
- *
- * This parser is intentionally simple and robust.
- */
-
 function parseFrontmatter(md) {
   const m = md.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
   if (!m) return { deck: {}, body: md };
   const fm = m[1];
   const body = md.slice(m[0].length);
+
   const deck = {};
-  // super simple YAML-ish parse for deck keys
-  // supports:
-  // deck:
-  //   layout: LAYOUT_WIDE
-  //   themeFont: Aptos
   const lines = fm.split(/\r?\n/);
   let inDeck = false;
   for (const line of lines) {
@@ -39,15 +21,14 @@ function parseFrontmatter(md) {
 }
 
 function parseHint(line) {
-  // <!-- slide:type=timeline foo=bar -->
-  const m = line.match(/<!--\s*slide:type=([a-zA-Z0-9_]+)([\s\S]*?)-->/);
+  // <!-- slide:template=sidebarCards iconChar=... -->
+  const m = line.match(/<!--\s*slide:([a-zA-Z]+)=([a-zA-Z0-9_]+)([\s\S]*?)-->/);
   if (!m) return null;
-  const type = m[1].trim();
-  const rest = (m[2] || "").trim();
+  const kind = m[1].trim(); // type or template
+  const value = m[2].trim();
+  const rest = (m[3] || "").trim();
 
   const params = {};
-  // parse key=value tokens
-  // supports key=value and key="value with spaces"
   const re = /([a-zA-Z0-9_]+)\s*=\s*("([^"]+)"|[^\s]+)/g;
   let mm;
   while ((mm = re.exec(rest))) {
@@ -55,7 +36,7 @@ function parseHint(line) {
     const raw = mm[3] ?? mm[2];
     params[key] = String(raw).replace(/^"|"$/g, "");
   }
-  return { type, params };
+  return { kind, value, params };
 }
 
 function collectSlides(body) {
@@ -68,190 +49,178 @@ function collectSlides(body) {
     cur = null;
   };
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-
+  for (const line of lines) {
     if (line.startsWith("## ")) {
       push();
-      cur = { title: line.replace(/^##\s+/, "").trim(), hint: null, content: [] };
+      cur = { title: line.replace(/^##\s+/, "").trim(), hints: {}, params: {}, raw: [] };
       continue;
     }
     if (!cur) continue;
 
     const hint = parseHint(line);
     if (hint) {
-      cur.hint = hint;
+      cur.hints[hint.kind] = hint.value;
+      cur.params = { ...cur.params, ...hint.params };
       continue;
     }
-    cur.content.push(line);
+
+    cur.raw.push(line);
   }
   push();
   return slides;
 }
 
-function parseBullets(contentLines) {
-  const items = [];
-  for (const l of contentLines) {
-    const m = l.match(/^\s*-\s+(.*)\s*$/);
-    if (m) items.push(m[1].trim());
+/**
+ * Parse subsections:
+ * ### Heading
+ * - bullet
+ */
+function parseSections(rawLines) {
+  const blocks = [];
+  let cur = null;
+
+  const push = () => {
+    if (cur) blocks.push(cur);
+    cur = null;
+  };
+
+  for (const line of rawLines) {
+    if (line.startsWith("### ")) {
+      push();
+      cur = { heading: line.replace(/^###\s+/, "").trim(), bullets: [] };
+      continue;
+    }
+    if (!cur) continue;
+    const m = line.match(/^\s*-\s+(.*)\s*$/);
+    if (m) cur.bullets.push(m[1].trim());
   }
-  return items.filter(Boolean);
+  push();
+  return blocks;
 }
 
-function parseKeyValueList(items) {
-  // "- key: value" -> { key, value }
-  const out = [];
-  for (const it of items) {
-    const m = it.match(/^([^:]+)\s*:\s*(.+)$/);
-    if (m) out.push({ k: m[1].trim(), v: m[2].trim() });
-  }
-  return out;
-}
-
-function parseMarkdownTable(contentLines) {
-  // find consecutive table lines containing '|'
-  const tableLines = contentLines.filter((l) => l.includes("|")).map((l) => l.trim());
-  if (tableLines.length < 2) return null;
-
-  // header
-  const header = tableLines[0]
-    .split("|")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  // separator line usually second
+/**
+ * Parse table blocks inside a section (optional):
+ * We support markdown tables like:
+ * | A | B | C |
+ * |---|---|---|
+ * | 1 | 2 | 3 |
+ */
+function parseMarkdownTable(rawLines) {
   const rows = [];
-  for (let i = 2; i < tableLines.length; i++) {
-    const cols = tableLines[i]
-      .split("|")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    if (cols.length) rows.push(cols);
+  for (const l of rawLines) {
+    if (!l.trim().startsWith("|")) continue;
+    const cols = l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+    rows.push(cols);
   }
-  if (!header.length || !rows.length) return null;
-  return { columns: header, rows };
+  if (rows.length < 2) return null;
+
+  // Remove separator row if it looks like ---|---|
+  const header = rows[0];
+  const body = rows.slice(1).filter((r) => !r.every((c) => /^-+$/.test(c.replace(/:/g, "").trim())));
+  return { header, rows: body };
 }
 
 export function mdToSpec(md, defaults = { defaultLayout: "LAYOUT_WIDE", defaultFont: "Aptos" }) {
   const { deck, body } = parseFrontmatter(md);
-  const s = collectSlides(body);
-
-  const layout = deck.layout || defaults.defaultLayout || "LAYOUT_WIDE";
-  const fontFace = deck.themeFont || defaults.defaultFont || "Aptos";
+  const slidesMd = collectSlides(body);
 
   const spec = {
-    layout,
+    layout: deck.layout || defaults.defaultLayout || "LAYOUT_WIDE",
     fileName: "output.pptx",
-    theme: { fontFace },
+    theme: { fontFace: deck.themeFont || defaults.defaultFont || "Aptos" },
     slides: []
   };
 
-  for (const slide of s) {
-    const hintType = slide.hint?.type || null;
-    const params = slide.hint?.params || {};
-    const bullets = parseBullets(slide.content);
-    const table = parseMarkdownTable(slide.content);
+  for (const s of slidesMd) {
+    const template = s.hints.template || null;
+    const type = s.hints.type || null;
+    const blocks = parseSections(s.raw);
 
-    // Type decision (explicit first)
-    let type = hintType;
-
-    // Fallback inference when no explicit type
-    if (!type) {
-      if (table) type = "comparisonTable";
-      else type = "bullets";
-    }
-
-    // Build per-type JSON
-    if (type === "title") {
-      // Expect "- title: X" "- subtitle: Y"
-      const kv = parseKeyValueList(bullets);
-      const title = kv.find((x) => x.k.toLowerCase() === "title")?.v || slide.title;
-      const subtitle = kv.find((x) => x.k.toLowerCase() === "subtitle")?.v || "";
-      spec.slides.push({ type: "title", title, subtitle });
+    // Title slide shortcut
+    if ((type || template) === "title") {
+      const lines = s.raw.filter((l) => l.trim().startsWith("-"));
+      const kv = {};
+      for (const l of lines) {
+        const mm = l.replace(/^\s*-\s*/, "").match(/^([^:]+)\s*:\s*(.+)$/);
+        if (mm) kv[mm[1].trim().toLowerCase()] = mm[2].trim();
+      }
+      spec.slides.push({ template: "title", title: kv.title || s.title, subtitle: kv.subtitle || "" });
       continue;
     }
 
-    if (type === "imageHero") {
+    // Template-first
+    if (template) {
       spec.slides.push({
-        type: "imageHero",
-        title: slide.title,
-        subtitle: params.subtitle || "",
-        imagePath: params.imagePath || params.image || "",
-        caption: params.caption || ""
+        template,
+        title: s.title,
+        params: s.params || {},
+        blocks
+      });
+      continue;
+    }
+
+    // Type-based slides (kept for backward compat; generate will map these to templates)
+    // Enhance spec for known types
+    if (type === "twoColumn") {
+      // Expect blocks: ### 左 / ### 右 (or any 2 blocks)
+      const left = blocks[0] || { heading: "左", bullets: [] };
+      const right = blocks[1] || { heading: "右", bullets: [] };
+      spec.slides.push({
+        type,
+        title: s.title,
+        params: s.params || {},
+        left: { heading: left.heading, bullets: left.bullets },
+        right: { heading: right.heading, bullets: right.bullets }
       });
       continue;
     }
 
     if (type === "timeline") {
-      // Use "- Label: Text" style
-      const kv = parseKeyValueList(bullets);
-      const items = kv.length
-        ? kv.map((x) => ({ label: x.k, text: x.v }))
-        : bullets.map((t, idx) => ({ label: `Step ${idx + 1}`, text: t }));
-      spec.slides.push({ type: "timeline", title: slide.title, items });
-      continue;
-    }
-
-    if (type === "kpiCards") {
-      // "- 売上: 100" -> cards
-      const kv = parseKeyValueList(bullets);
-      const cards = kv.map((x) => ({ label: x.k, value: x.v }));
-      spec.slides.push({ type: "kpiCards", title: slide.title, cards });
+      // Each block is a step
+      const steps = blocks.map((b) => ({ title: b.heading, body: b.bullets }));
+      spec.slides.push({
+        type,
+        title: s.title,
+        params: s.params || {},
+        steps
+      });
       continue;
     }
 
     if (type === "comparisonTable") {
-      // prefer explicit columns param, else parse markdown table
-      if (params.columns) {
-        const columns = String(params.columns)
-          .split(",")
-          .map((x) => x.trim())
-          .filter(Boolean);
-        // rows from bullets as CSV: "- a, b, c"
-        const rows = bullets
-          .map((t) => t.split(",").map((x) => x.trim()))
-          .filter((r) => r.length && r.some(Boolean));
-        spec.slides.push({ type: "comparisonTable", title: slide.title, columns, rows });
-      } else if (table) {
-        spec.slides.push({ type: "comparisonTable", title: slide.title, columns: table.columns, rows: table.rows });
-      } else {
-        spec.slides.push({ type: "bullets", title: slide.title, items: bullets });
+      // First try parse markdown table from raw
+      const table = parseMarkdownTable(s.raw);
+      if (table) {
+        spec.slides.push({
+          type,
+          title: s.title,
+          params: s.params || {},
+          headers: table.header,
+          rows: table.rows
+        });
+        continue;
       }
+      // Fallback: use blocks as rows [heading + bullets...]
+      const headers = ["項目", "内容"];
+      const rows = blocks.map((b) => [b.heading, (b.bullets || []).join(" / ")]);
+      spec.slides.push({ type, title: s.title, params: s.params || {}, headers, rows });
       continue;
     }
 
-    if (type === "chart") {
-      // expects params.chartType and series encoded later (keep simple for now)
-      // For now: if bullets are "Name: 1,2,3" then build series
-      const chartType = (params.chartType || "bar").toLowerCase();
-      const kv = parseKeyValueList(bullets);
-      const series = kv.map((x) => {
-        const nums = x.v.split(",").map((n) => Number(n.trim())).filter((n) => Number.isFinite(n));
-        return { name: x.k, labels: nums.map((_, i) => `P${i + 1}`), values: nums };
-      });
-      spec.slides.push({ type: "chart", title: slide.title, chartType, series, options: { showLegend: true, showTitle: false } });
+    if (type) {
+      spec.slides.push({ type, title: s.title, params: s.params || {}, blocks });
       continue;
     }
 
-    if (type === "twoColumn") {
-      // simple: first half bullets -> left, rest -> right
-      const half = Math.ceil(bullets.length / 2);
-      spec.slides.push({
-        type: "twoColumn",
-        title: slide.title,
-        left: { heading: params.leftHeading || "要点", items: bullets.slice(0, half) },
-        right: { heading: params.rightHeading || "補足", items: bullets.slice(half), text: params.rightText || "" }
-      });
-      continue;
-    }
-
-    // default bullets
-    spec.slides.push({ type: "bullets", title: slide.title, items: bullets });
+    // Default bullets if nothing is specified
+    const bullets = blocks.flatMap((b) => b.bullets);
+    spec.slides.push({ type: "bullets", title: s.title, items: bullets });
   }
 
   return spec;
 }
 
-// CLI usage for debug
+// CLI debug
 if (process.argv[1]?.endsWith("md_to_spec.mjs")) {
   const args = process.argv.slice(2);
   const get = (k) => {
